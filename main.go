@@ -41,7 +41,6 @@ func main() {
 		fmt.Println("User already online")
 		os.Exit(1)
 	}
-	defer conn.Do("DEL", userkey)
 
 	val, err = conn.Do("SADD", "users", username)
 
@@ -60,7 +59,7 @@ func main() {
 
 	// Now we create a channel and go routine that'll subscribe to our published messages
 	// We'll give it its own connection because subscribes like to have their own connection
-	subchan := make(chan string)
+	subChan := make(chan string)
 	go func() {
 		subconn, err := redisurl.Connect()
 		if err != nil {
@@ -74,7 +73,7 @@ func main() {
 		for {
 			switch v := psc.Receive().(type) {
 			case redis.Message:
-				subchan <- string(v.Data)
+				subChan <- string(v.Data)
 			case redis.Subscription:
 				break // We don't need to listen to subscription messages,
 			case error:
@@ -85,7 +84,7 @@ func main() {
 
 	// Now we'll make a simple channel and go routine that listens for complete lines from the user
 	// When a complete line is entered, it'll be delivered to the channel.
-	saychan := make(chan string)
+	sayChan := make(chan string)
 	go func() {
 		prompt := username + ">"
 		bio := bufio.NewReader(os.Stdin)
@@ -94,10 +93,10 @@ func main() {
 			line, _, err := bio.ReadLine()
 			if err != nil {
 				fmt.Println(err)
-				saychan <- "/exit"
+				sayChan <- "/exit"
 				return
 			}
-			saychan <- string(line)
+			sayChan <- string(line)
 		}
 	}()
 
@@ -107,15 +106,15 @@ func main() {
 
 	for !chatExit {
 		select {
-		case msg := <-subchan:
+		case msg := <-subChan:
 			fmt.Println(msg)
 		case <-tickerChan:
-			_, err = conn.Do("SET", userkey, username, "XX", "EX", "120")
-			if err != nil {
-				fmt.Println("Set failed")
+			val, err = conn.Do("SET", userkey, username, "XX", "EX", "120")
+			if err != nil || val == nil {
+				fmt.Println("Heartbeat set failed")
+				chatExit = true
 			}
-			break
-		case line := <-saychan:
+		case line := <-sayChan:
 			if line == "/exit" {
 				chatExit = true
 			} else if line == "/who" {
@@ -128,7 +127,6 @@ func main() {
 			}
 		default:
 			time.Sleep(100 * time.Millisecond)
-			break
 		}
 	}
 
