@@ -75,7 +75,7 @@ func main() {
 			case redis.Message:
 				subChan <- string(v.Data)
 			case redis.Subscription:
-				break // We don't need to listen to subscription messages,
+				// We don't need to listen to subscription messages,
 			case error:
 				return
 			}
