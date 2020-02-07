@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/garyburd/redigo/redis"
@@ -60,20 +61,34 @@ func main() {
 	// Now we create a channel and go routine that'll subscribe to our published messages
 	// We'll give it its own connection because subscribes like to have their own connection
 	subChan := make(chan string)
-	go func() {
-		subconn, err := redisurl.Connect()
-		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
-		}
-		defer subconn.Close()
 
-		psc := redis.PubSubConn{Conn: subconn}
-		psc.Subscribe("messages")
+	subEventChan := make(chan string)
+
+	subconn, err := redisurl.Connect()
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	defer subconn.Close()
+
+	subscribes := make(map[string]struct{})
+
+	const commonChannelName string = "messages"
+
+	psc := redis.PubSubConn{Conn: subconn}
+	psc.Subscribe(commonChannelName)
+	subscribes[commonChannelName]=struct{}{}
+
+	go func() {
 		for {
 			switch v := psc.Receive().(type) {
 			case redis.Message:
-				subChan <- string(v.Data)
+				//fmt.Println("new msg on ",v.Channel, "data=",string(v.Data))
+				if v.Channel ==  commonChannelName {
+					subEventChan <- strings.Split(string(v.Data), " ")[0]
+				} else {
+					subChan <- string(v.Data)
+				}
 			case redis.Subscription:
 				// We don't need to listen to subscription messages,
 			case error:
@@ -100,7 +115,7 @@ func main() {
 		}
 	}()
 
-	conn.Do("PUBLISH", "messages", username+" has joined")
+	conn.Do("PUBLISH", commonChannelName, username+" has joined")
 
 	chatExit := false
 
@@ -108,11 +123,29 @@ func main() {
 		select {
 		case msg := <-subChan:
 			fmt.Println(msg)
+		case name := <-subEventChan:
+			if name != username {
+				_, exist := subscribes[name]
+				if !exist {
+					subscribes[name]=struct{}{}
+					psc.Subscribe(name)
+				}
+			}
 		case <-tickerChan:
 			val, err = conn.Do("SET", userkey, username, "XX", "EX", "120")
 			if err != nil || val == nil {
 				fmt.Println("Heartbeat set failed")
 				chatExit = true
+			}
+			names, _ := redis.Strings(conn.Do("SMEMBERS", "users"))
+			for _, name := range names {
+				if name != username {
+					_, exist := subscribes[name]
+					if !exist {
+						subscribes[name]=struct{}{}
+						psc.Subscribe(name)
+					}
+				}
 			}
 		case line := <-sayChan:
 			if line == "/exit" {
@@ -123,7 +156,7 @@ func main() {
 					fmt.Println(name)
 				}
 			} else {
-				conn.Do("PUBLISH", "messages", username+":"+line)
+				conn.Do("PUBLISH", username, line)
 			}
 		default:
 			time.Sleep(100 * time.Millisecond)
@@ -133,6 +166,6 @@ func main() {
 	// We're leaving so let's delete the userkey and remove the username from the online set
 	conn.Do("DEL", userkey)
 	conn.Do("SREM", "users", username)
-	conn.Do("PUBLISH", "messages", username+" has left")
+	conn.Do("PUBLISH", commonChannelName, username+" has left")
 
 }
